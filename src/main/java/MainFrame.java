@@ -51,6 +51,7 @@ public class MainFrame extends JFrame {
 	private JPanel imageToolsPanel;
 	private JLabel imageLabel;
 	private JLabel imageInfoLabel;
+	private ImageInfoPanel imageInfoPanel;
 	private JLabel colorValuesLabel;
 	private BufferedImage image;
 	private BufferedImage originalImage;
@@ -116,6 +117,9 @@ public class MainFrame extends JFrame {
 		imageToolsPanel.add(convertToColorSystem);
 		imageToolsPanel.add(componentPanel);
 		imageToolsPanel.add(channelPlanesPanel);
+		imageInfoPanel = new ImageInfoPanel();
+		imageInfoPanel.setAlignmentX(JButton.LEFT_ALIGNMENT);
+		imageToolsPanel.add(imageInfoPanel);
 		imageToolsPanel.add(Box.createVerticalStrut(6));
 		JLabel formatLbl = new JLabel("Image format:");
 		formatLbl.setForeground(Color.WHITE);
@@ -147,6 +151,7 @@ public class MainFrame extends JFrame {
 			}
 			activeSystem = parseSystem((String) convertToColorSystem.getSelectedItem());
 			loadColorSystem(activeSystem);
+			updateImageMetadata();
 		});
 
 		convertToImageFormat = new JComboBox<>(imageFormats);
@@ -160,7 +165,10 @@ public class MainFrame extends JFrame {
 				convertImageFormat("png");
 			} else if ("JPG".equalsIgnoreCase(sel)) {
 				convertImageFormat("jpg");
+			} else if ("BMP".equalsIgnoreCase(sel)) {
+				convertImageFormat("bmp");
 			}
+			updateImageMetadata();
 		});
 	}
 
@@ -358,6 +366,7 @@ public class MainFrame extends JFrame {
 			suppressColorComboEvents = false;
 			loadColorSystem(ColorSpaceMath.System.RGB);
 			componentPanel.resetSlidersUi();
+			updateImageMetadata();
 			colorValuesLabel.setText("Click image or color space to inspect values.");
 		} catch (IOException ex) {
 			JOptionPane.showMessageDialog(this, "Could not load image: " + ex.getMessage());
@@ -385,6 +394,7 @@ public class MainFrame extends JFrame {
 		}
 		imageLabel.setIcon(new ImageIcon(image));
 		imageInfoLabel.setText("No image selected — use Select or drag & drop.");
+		imageInfoPanel.clear();
 		colorValuesLabel.setText(" ");
 		colorSpace3DPanel.setPointCloud(null, null);
 	}
@@ -399,6 +409,7 @@ public class MainFrame extends JFrame {
 		suppressColorComboEvents = false;
 		loadColorSystem(ColorSpaceMath.System.RGB);
 		componentPanel.resetSlidersUi();
+		updateImageMetadata();
 		colorValuesLabel.setText("Image reset to original.");
 	}
 
@@ -456,20 +467,25 @@ public class MainFrame extends JFrame {
 		updateImageInfoLabel();
 	}
 
-	private void updateImageInfoLabel() {
-		if (imageName == null || imageExtension == null) {
+	private void updateImageMetadata() {
+		if (image == null || imageFile == null || imageName == null || imageExtension == null) {
 			return;
 		}
-		int imageSize = (int) imageBytes / 1024;
-		if (imageSize == 0 && imageBytes > 0) {
-			imageSize = 1;
+		try {
+			ImageMetadata meta = new ImageMetadata(imageFile, image, imageExtension, activeSystem.name(),
+					getSelectedFormatFromCombo(), imageBytes);
+			imageInfoPanel.showMetadata(meta);
+			imageInfoLabel.setText(String.format(
+					"<html><b>%s</b> — %d×%d px — %s — Color: <b>%s</b></html>",
+					imageName, imageWidth, imageHeight, ImageMetadata.formatFileSize(imageBytes),
+					activeSystem.name()));
+		} catch (IOException e) {
+			imageInfoLabel.setText("Could not read image metadata.");
 		}
-		String imageSizeExtension = (imageSize / 1024 >= 1) ? "MB" : "KB";
-		int displaySize = (imageSize / 1024 >= 1) ? imageSize / 1024 : imageSize;
-		imageInfoLabel.setText(String.format(
-				"<html><b>%s</b> &nbsp;|&nbsp; %d×%d px &nbsp;|&nbsp; %d%s &nbsp;|&nbsp; %s &nbsp;|&nbsp; Space: <b>%s</b></html>",
-				imageName, imageWidth, imageHeight, displaySize, imageSizeExtension, imageExtension.toUpperCase(),
-				activeSystem.name()));
+	}
+
+	private void updateImageInfoLabel() {
+		updateImageMetadata();
 	}
 
 	private void syncFormatComboBox() {
@@ -478,32 +494,103 @@ public class MainFrame extends JFrame {
 			convertToImageFormat.setSelectedIndex(0);
 		} else if ("jpg".equalsIgnoreCase(imageExtension) || "jpeg".equalsIgnoreCase(imageExtension)) {
 			convertToImageFormat.setSelectedIndex(1);
+		} else if ("bmp".equalsIgnoreCase(imageExtension)) {
+			convertToImageFormat.setSelectedIndex(2);
 		}
 		suppressFormatComboEvents = false;
 	}
 
+	private String getSelectedFormatFromCombo() {
+		String sel = (String) convertToImageFormat.getSelectedItem();
+		if (sel == null) {
+			return imageExtension != null ? imageExtension : "png";
+		}
+		if ("PNG".equalsIgnoreCase(sel)) {
+			return "png";
+		}
+		if ("JPG".equalsIgnoreCase(sel)) {
+			return "jpg";
+		}
+		if ("BMP".equalsIgnoreCase(sel)) {
+			return "bmp";
+		}
+		return normalizeExtension(sel);
+	}
+
+	private FileNameExtensionFilter filterForFormat(String format) {
+		switch (normalizeExtension(format)) {
+		case "jpg":
+			return new FileNameExtensionFilter("JPEG image (*.jpg, *.jpeg)", "jpg", "jpeg");
+		case "bmp":
+			return new FileNameExtensionFilter("Bitmap image (*.bmp)", "bmp");
+		default:
+			return new FileNameExtensionFilter("PNG image (*.png)", "png");
+		}
+	}
+
+	private File ensureFileExtension(File file, String format) {
+		String ext = "." + normalizeExtension(format);
+		File parent = file.getParentFile();
+		if (parent == null) {
+			parent = new File(".");
+		}
+		String name = file.getName();
+		int dot = name.lastIndexOf('.');
+		String base = dot > 0 ? name.substring(0, dot) : name;
+		return new File(parent, base + ext);
+	}
+
+	private String defaultSaveFileName(String format) {
+		String base = imageName;
+		int dot = base.lastIndexOf('.');
+		if (dot > 0) {
+			base = base.substring(0, dot);
+		}
+		return base + "." + normalizeExtension(format);
+	}
+
+	private BufferedImage prepareImageForFormat(BufferedImage src, String format) {
+		if ("jpg".equals(normalizeExtension(format)) && src.getColorModel().hasAlpha()) {
+			return flattenAlphaToRgb(src);
+		}
+		if ("bmp".equals(normalizeExtension(format))) {
+			BufferedImage rgb = new BufferedImage(src.getWidth(), src.getHeight(), BufferedImage.TYPE_INT_RGB);
+			Graphics2D g = rgb.createGraphics();
+			g.drawImage(src, 0, 0, null);
+			g.dispose();
+			return rgb;
+		}
+		return src;
+	}
+
 	private void saveImage() {
-		if (image == null || imageExtension == null) {
+		if (image == null) {
+			JOptionPane.showMessageDialog(this, "No image to save.");
 			return;
 		}
-		fileChooser.setDialogTitle("Save image");
-		if (imageExtension.equalsIgnoreCase("png")) {
-			fileChooser.setFileFilter(new FileNameExtensionFilter("PNG", "png"));
-		} else {
-			fileChooser.setFileFilter(new FileNameExtensionFilter("JPEG", "jpg", "jpeg"));
-		}
+		String saveFormat = getSelectedFormatFromCombo();
+		fileChooser.setDialogTitle("Save image as " + saveFormat.toUpperCase());
+		fileChooser.setFileFilter(filterForFormat(saveFormat));
 		fileChooser.setAcceptAllFileFilterUsed(false);
 		fileChooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
-		fileChooser.setSelectedFile(new File(imageName));
+		fileChooser.setSelectedFile(new File(defaultSaveFileName(saveFormat)));
 		if (fileChooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
 			try {
-				File saveFile = fileChooser.getSelectedFile();
-				BufferedImage toSave = image;
-				if (imageExtension.equalsIgnoreCase("jpg") && image.getColorModel().hasAlpha()) {
-					toSave = flattenAlphaToRgb(image);
+				File saveFile = ensureFileExtension(fileChooser.getSelectedFile(), saveFormat);
+				BufferedImage toSave = prepareImageForFormat(image, saveFormat);
+				String writerFormat = normalizeExtension(saveFormat);
+				if (!ImageIO.write(toSave, writerFormat, saveFile)) {
+					JOptionPane.showMessageDialog(this,
+							"No ImageIO writer for format: " + writerFormat.toUpperCase());
+					return;
 				}
-				ImageIO.write(toSave, normalizeExtension(imageExtension), saveFile);
-				JOptionPane.showMessageDialog(this, "Saved:\n" + saveFile.getAbsolutePath());
+				imageExtension = writerFormat;
+				imageName = saveFile.getName();
+				imageBytes = saveFile.length();
+				syncFormatComboBox();
+				updateImageInfoLabel();
+				JOptionPane.showMessageDialog(this,
+						"Saved as " + writerFormat.toUpperCase() + ":\n" + saveFile.getAbsolutePath());
 			} catch (IOException e) {
 				JOptionPane.showMessageDialog(this, "Save failed: " + e.getMessage());
 			}
